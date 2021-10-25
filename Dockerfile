@@ -4,4 +4,5 @@ FROM node:12-alpine
 #WORKDIR .
 COPY . .
 RUN npm install
+RUN npm build
 CMD ["node", "dist/index.js"]

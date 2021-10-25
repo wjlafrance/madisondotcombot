@@ -1,10 +1,9 @@
 import Snoowrap, { Submission, Subreddit } from "snoowrap";
 import https from "https";
 import { convert } from "html-to-text";
-import sqlite3 from "sqlite3";
-import { open } from 'sqlite';
-import * as readline from "readline";
 import moment from "moment";
+
+import { DatabaseAccess } from "./database"
 
 require("dotenv").config();
 
@@ -16,56 +15,49 @@ const r = new Snoowrap({
   password: process.env.password
 });
 
-export async function MadisonDotComBot() {
+async function prepareArticle(url: string): Promise<string> {
 
-  let rl = readline.createInterface({input: process.stdin, output: process.stdout});
-
-  const database = await open({
-    filename: "state.db",
-    driver: sqlite3.Database
-  });
-  await database.exec("CREATE TABLE IF NOT EXISTS seen_posts (id TEXT)");
-
-  async function hasSeenSubmission(submission: Snoowrap.Submission): Promise<boolean> {
-    const result = await database.get('SELECT COUNT(id) FROM seen_posts WHERE id = ?', [submission.id]);
-    return result["COUNT(id)"] as number > 0;
-  }
-
-  async function markSeenSubmission(submission: Snoowrap.Submission): Promise<void> {
-    return database.run("INSERT INTO seen_posts (id) VALUES (?)", [submission.id]).then((result) => {
-      if (result.changes != 1) {
-        throw new Error("Expected one change marking submission as seen.");
-      }
-    });
-  }
-
-  async function fetchArticle(url: string): Promise<string> {
-    return new Promise((resolve, reject) => {
+  async function loadHttps(url: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
       const request = https.request(url, (result) => {
         var data = '';
-        result.on('data', (chunk) => {
-          data += chunk;
-        });
-        result.on('end', () => {
-          // console.log(data);
-          resolve(convert(data, {
-            baseElements: { selectors: [
-              "div.lee-article-text"
-            ]},
-            ignoreHref: true
-          }));
-        });
+        result.on('data', (chunk) => { data += chunk; });
+        result.on('end', () => { resolve(data); });
       });
       request.on('error', reject);
       request.end();
-    });
+    })
   }
 
-  r.getSubreddit("madisonwi").search({query:'site:"madison.com"'}).then(async (submissions) => {
+  return loadHttps(url).then((data) => convert(data, {
+    baseElements: {
+      selectors: [
+        "div.lee-article-text"
+      ]
+    },
+    ignoreHref: true
+  })).then((article) => {
+    return article
+      .split(/\r?\n/)
+      .filter((line) => { return !line.match(/^-+$/) }) // eliminate long dashed line at the bottom
+      .map((line_1) => `> ${line_1}`) // add quote for reddit, including on empty lines
+      .join("\n")
+      + "\n\n^(I am a very new bot. Sorry if I misbehave. Please consider supporting local journalism.)";
+  });
+}
+
+async function MadisonDotComBot(): Promise<void> {
+
+  var bigpromise = new Promise<void>(async (resolve, reject) => { resolve() });
+
+  const db = await DatabaseAccess.get();
+
+  await r.getSubreddit("madisonwi").search({ query: 'site:"madison.com"' }).then((submissions) => {
     let sortedSubmissions = submissions.sort((lhs, rhs) => {
       // newest first
       return rhs.created - lhs.created;
     }).filter((submission) => {
+      // no more than 2 days old
       return submission.created > moment().subtract(2, "days").unix();
     });
 
@@ -74,60 +66,32 @@ export async function MadisonDotComBot() {
       console.log(index, submission.id, new Date(submission.created * 1000), submission.title);
     });
 
-    // this promise is added onto through the following loop
-    var bigpromise = new Promise<void>((resolve, reject) => {
-      resolve();
-    });
-
-    sortedSubmissions.forEach(async (submission: Snoowrap.Submission, index: number) => {
-
-      if (await hasSeenSubmission(submission)) {
-        bigpromise = bigpromise.then(() => {
-          console.log("Already marked", submission.id, "as read. Skipping.");
-        });
-        return;
-      }
-
+    for (const submission of sortedSubmissions) {
       bigpromise = bigpromise.then(() => {
+        return db.hasSeenSubmission(submission)
+
+      }).then(async (seen: boolean) => {
+        if (seen) {
+          console.log("Already marked", submission.id, "as read. Skipping.");
+          return;
+        }
+
         console.log("Never seen before", `https://reddit.com/${submission.id}`, new Date(submission.created * 1000), "\n", submission.url);
 
-        return new Promise<string>((resolve, reject) => {
-          rl.question("Fetch?", resolve);
-        });
+        const content = await prepareArticle(submission.url);
 
-      }).then(() => {
-        return fetchArticle(submission.url)
+        await submission.reply(content).then(() => {});
 
-      }).then((content: string) => {
-        let purified = content.split(/\r?\n/).filter((line) => {
-          return !line.match(/^-+$/) // eliminate long dashed line at the bottom
-        }).map((line) => `> ${line}`).join("\n");
-        purified += "\n\n^(I am a very new bot. Sorry if I misbehave. Please consider supporting local journalism.)"
+        await db.markSeenSubmission(submission);
 
-        console.log(purified);
-        return new Promise<string>((resolve, reject) => {
-          rl.question("Post?", (answer) => resolve(purified));
-        });
-
-      }).then((content: string) => {
-        return submission.reply(content)
-
-      }).then(() => {
-        return new Promise<string>((resolve, reject) => {
-          rl.question("Mark as seen?", resolve);
-        })
-
-      }).then(() => {
-        markSeenSubmission(submission)
-
-      }).then(() => {
-        console.log(`Marked ${submission.id} as seen.`);
+        console.log(`Submitted ${submission.id} to reddit and marked as seen.`);
       });
-
-      return bigpromise;
-    });
+    }
   });
 
+  return bigpromise;
 }
 
-MadisonDotComBot();
+MadisonDotComBot().then(() => {
+  console.log("fin!");
+});
