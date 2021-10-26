@@ -1,7 +1,7 @@
 import sqlite3 from "sqlite3";
 import { Database, open } from 'sqlite';
 
-import Snoowrap, { Submission, Subreddit } from "snoowrap";
+import Snoowrap from "snoowrap";
 
 export class DatabaseAccess {
   database: Database<sqlite3.Database, sqlite3.Statement>;

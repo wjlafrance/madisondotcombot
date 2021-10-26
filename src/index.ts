@@ -1,11 +1,12 @@
-import Snoowrap, { Submission, Subreddit } from "snoowrap";
+import Snoowrap from "snoowrap";
 import https from "https";
 import { convert } from "html-to-text";
 import moment from "moment";
 
 import { DatabaseAccess } from "./database"
 
-require("dotenv").config();
+import dotenv from "dotenv";
+dotenv.config();
 
 const r = new Snoowrap({
   userAgent: "madisondotcombot v0.1",
@@ -20,7 +21,7 @@ async function prepareArticle(url: string): Promise<string> {
   async function loadHttps(url: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const request = https.request(url, (result) => {
-        var data = '';
+        let data = '';
         result.on('data', (chunk) => { data += chunk; });
         result.on('end', () => { resolve(data); });
       });
@@ -48,12 +49,12 @@ async function prepareArticle(url: string): Promise<string> {
 
 async function MadisonDotComBot(): Promise<void> {
 
-  var bigpromise = new Promise<void>(async (resolve, reject) => { resolve() });
+  let bigpromise = new Promise<void>((resolve) => { resolve() });
 
   const db = await DatabaseAccess.get();
 
-  await r.getSubreddit("madisonwi").search({ query: 'site:"madison.com"' }).then((submissions) => {
-    let sortedSubmissions = submissions.sort((lhs, rhs) => {
+  await r.getSubreddit("madisonwi").search({ query: 'site:"madison.com"', sort: 'new' }).then((submissions) => {
+    const sortedSubmissions = submissions.sort((lhs, rhs) => {
       // newest first
       return rhs.created - lhs.created;
     }).filter((submission) => {
@@ -62,8 +63,11 @@ async function MadisonDotComBot(): Promise<void> {
     });
 
     // print all submissions
-    sortedSubmissions.forEach((submission: Snoowrap.Submission, index: number) => {
-      console.log(index, submission.id, new Date(submission.created * 1000), submission.title);
+    submissions.forEach((submission: Snoowrap.Submission, index: number) => {
+      const showExcluded = false;
+      if (showExcluded || sortedSubmissions.indexOf(submission) != -1) {
+        console.log(index, submission.id, new Date(submission.created * 1000), submission.title);
+      }
     });
 
     for (const submission of sortedSubmissions) {
@@ -71,8 +75,18 @@ async function MadisonDotComBot(): Promise<void> {
         return db.hasSeenSubmission(submission)
 
       }).then(async (seen: boolean) => {
+        const fetched = await (submission.fetch() as Promise<Omit<Snoowrap.Submission, "then">>);
+        const hasCommented = (undefined != fetched.comments.find((comment) => {
+          return comment.author.name == process.env.username;
+        }));
+
+        if (hasCommented) {
+          console.log(`Already commented on ${submission.id}. Skipping.`);
+          return;
+        }
+        
         if (seen) {
-          console.log("Already marked", submission.id, "as read. Skipping.");
+          console.log(`Already marked ${submission.id} as read. Skipping.`);
           return;
         }
 
@@ -80,6 +94,7 @@ async function MadisonDotComBot(): Promise<void> {
 
         const content = await prepareArticle(submission.url);
 
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
         await submission.reply(content).then(() => {});
 
         await db.markSeenSubmission(submission);
