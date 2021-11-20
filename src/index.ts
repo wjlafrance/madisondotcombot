@@ -1,6 +1,6 @@
 import Snoowrap from "snoowrap";
 import https from "https";
-import { convert } from "html-to-text";
+import { convert as convertHtmlToText } from "html-to-text";
 import moment from "moment";
 
 import { DatabaseAccess } from "./database"
@@ -16,35 +16,40 @@ const r = new Snoowrap({
   password: process.env.password
 });
 
+const dryRun = false;
+
 async function prepareArticle(url: string): Promise<string> {
 
   async function loadHttps(url: string): Promise<string> {
     return new Promise<string>((resolve, reject) => {
       const request = https.request(url, (result) => {
         let data = '';
-        result.on('data', (chunk) => { data += chunk; });
-        result.on('end', () => { resolve(data); });
+        result.on('data', chunk => data += chunk );
+        result.on('end', () => resolve(data));
       });
       request.on('error', reject);
       request.end();
     })
   }
 
-  return loadHttps(url).then((data) => convert(data, {
+  const html = await loadHttps(url);
+  const text = convertHtmlToText(html, {
     baseElements: {
       selectors: [
         "div.lee-article-text"
       ]
     },
     ignoreHref: true
-  })).then((article) => {
-    return article
-      .split(/\r?\n/)
-      .filter((line) => { return !line.match(/^-+$/) }) // eliminate long dashed line at the bottom
-      .map((line_1) => `> ${line_1}`) // add quote for reddit, including on empty lines
-      .join("\n")
-      + "\n\n^(I am a very new bot. Sorry if I misbehave. Please consider supporting local journalism.)";
-  });
+  })
+  const signoff = `This is just a preview. [Click here](${url}) for the full article. [Please support local journalism!](https://madison.com/members/join/) Madison.com is $1 for the first 6 months.`;
+
+  return text
+    .split(/\r?\n/)
+    .filter((_, index, ary) => ary.slice(0, index+1).filter(line => line.match(/^\s*$/)).length < 5) // count up blank lines, limit to 5 paragraphs
+    .map((line) => `> ${line}`) // add quote for reddit, including on empty lines
+    .filter((line) => !line.match(/^-+$/)) // eliminate long dashed line at the bottom, probably not necessary if limiting
+    .join("\n")
+    + `\n\n` + signoff;
 }
 
 async function MadisonDotComBot(): Promise<void> {
@@ -82,24 +87,30 @@ async function MadisonDotComBot(): Promise<void> {
 
         if (hasCommented) {
           console.log(`Already commented on ${submission.id}. Skipping.`);
-          return;
+          if (!dryRun) {
+            return;
+          }
         }
         
         if (seen) {
           console.log(`Already marked ${submission.id} as read. Skipping.`);
-          return;
+          if (!dryRun) {
+            return;
+          }
         }
 
-        console.log("Never seen before", `https://reddit.com/${submission.id}`, new Date(submission.created * 1000), "\n", submission.url);
+        console.log("Fetching summary for", `https://reddit.com/${submission.id}`, new Date(submission.created * 1000), "\n", submission.url);
 
         const content = await prepareArticle(submission.url);
+        console.log(content);
 
-        // eslint-disable-next-line @typescript-eslint/no-empty-function
-        await submission.reply(content).then(() => {});
+        if (!dryRun) {
+          // eslint-disable-next-line @typescript-eslint/no-empty-function
+          await submission.reply(content).then(() => {});
 
-        await db.markSeenSubmission(submission);
-
-        console.log(`Submitted ${submission.id} to reddit and marked as seen.`);
+          await db.markSeenSubmission(submission);
+          console.log(`Submitted ${submission.id} to reddit and marked as seen.`);
+        }
       });
     }
   });
